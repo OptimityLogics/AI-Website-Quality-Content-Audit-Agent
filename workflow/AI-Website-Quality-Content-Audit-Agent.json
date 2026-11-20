@@ -1,0 +1,572 @@
+{
+  "name": "AI Website Quality & Content Audit Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-start-url",
+              "name": "startUrl",
+              "type": "string",
+              "value": "={{ String($json.body.startUrl || '').trim() }}"
+            },
+            {
+              "id": "cfg-start-host",
+              "name": "startHost",
+              "type": "string",
+              "value": "={{ String($json.body.startUrl || '').trim().replace(/^https?:\\/\\//i, '').split(/[\\/?#:]/)[0].toLowerCase() }}"
+            },
+            {
+              "id": "cfg-allowed-domain",
+              "name": "allowedDomain",
+              "type": "string",
+              "value": "={{ String($json.body.startUrl || '').trim().replace(/^https?:\\/\\//i, '').split(/[\\/?#:]/)[0].toLowerCase() }}"
+            },
+            {
+              "id": "cfg-max-pages",
+              "name": "maxPages",
+              "type": "number",
+              "value": "={{ Number($json.body.maxPages) || 10 }}"
+            },
+            {
+              "id": "cfg-delay",
+              "name": "crawlDelayMs",
+              "type": "number",
+              "value": "={{ Number($json.body.crawlDelayMs) || 500 }}"
+            },
+            {
+              "id": "cfg-use-ai",
+              "name": "useAI",
+              "type": "boolean",
+              "value": "={{ $json.body.useAI === true || $json.body.useAI === 'true' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7a56bf0e-8273-432c-b55a-81f0aa8edf53",
+      "name": "Audit Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "39f48a9b-510a-4c7a-a47c-ad507e0c1b19",
+              "leftValue": "={{ $json.startHost }}",
+              "operator": {
+                "operation": "notEmpty",
+                "singleValue": true,
+                "type": "string"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        },
+        "options": {}
+      },
+      "id": "08bfc4ca-6153-4516-ad1a-ad5b3f5d0da1",
+      "name": "Authorised Target?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $input.first().json;\nconst helpers = this.helpers;\nconst UA = 'OptimityAuditBot/1.0 (authorised site audit)';\nconst maxPages = Math.min(Number(cfg.maxPages) || 10, 25);\nconst delayMs = Math.max(Number(cfg.crawlDelayMs) || 500, 250);\nconst maxLinkChecks = 30;\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms));\nconst parseUrl = (u) => { const m = String(u).match(/^(https?):\\/\\/([^\\/?#:]+)(?::(\\d+))?([^?#]*)(\\?[^#]*)?/i); if (!m) return null; return { protocol: m[1].toLowerCase(), hostname: m[2].toLowerCase(), port: m[3] || '', pathname: m[4] || '/', search: m[5] || '' }; };\nconst originOf = (p) => p.protocol + '://' + p.hostname + (p.port ? ':' + p.port : '');\nconst finalize = (u) => { const p = parseUrl(String(u).split('#')[0]); if (!p) return null; const segs = []; p.pathname.split('/').forEach((s) => { if (s === '..') { if (segs.length > 1) segs.pop(); } else if (s !== '.') { segs.push(s); } }); let path = segs.join('/'); if (path.charAt(0) !== '/') path = '/' + path; return originOf(p) + path + p.search; };\nconst norm = (href, base) => { const h = String(href).trim(); if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(h)) { return /^https?:/i.test(h) ? finalize(h) : null; } const b = parseUrl(base); if (!b) return null; if (h.indexOf('//') === 0) return finalize(b.protocol + ':' + h); const hh = h.split('#')[0]; if (hh === '') return finalize(base); if (hh.charAt(0) === '/') return finalize(originOf(b) + hh); if (hh.charAt(0) === '?') return finalize(originOf(b) + b.pathname + hh); return finalize(originOf(b) + b.pathname.replace(/[^\\/]*$/, '') + hh); };\nconst start = parseUrl(cfg.startUrl);\nif (!start) { throw new Error('startUrl must be a valid http(s) URL.'); }\nconst host = start.hostname;\nif (host !== String(cfg.allowedDomain || '').trim().toLowerCase()) {\n  throw new Error('Start URL host does not match the authorised domain. Audit stopped.');\n}\nconst notes = [];\nconst findings = [];\nlet fid = 0;\nconst snip = (s) => String(s).replace(/\\s+/g, ' ').slice(0, 160);\nconst add = (url, category, severity, rule, message, evidence, fix) => {\n  fid += 1;\n  findings.push({ id: 'F' + String(fid).padStart(3, '0'), url: url, category: category, severity: severity, rule: rule, message: message, evidence: String(evidence || '').slice(0, 260), fix: fix });\n};\nconst fetchUrl = async (url, method) => {\n  try {\n    const res = await helpers.httpRequest({ method: method || 'GET', url: url, headers: { 'User-Agent': UA }, timeout: 10000, returnFullResponse: true, ignoreHttpStatusErrors: true, json: false });\n    return { status: res.statusCode, type: String((res.headers || {})['content-type'] || ''), body: String(res.body || '') };\n  } catch (e) {\n    return { status: 0, type: '', body: '', error: String(e.message || e).slice(0, 120) };\n  }\n};\nconst strip = (s) => String(s).replace(/<script[^]*?<\\/script>/gi, ' ').replace(/<style[^]*?<\\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\\s+/g, ' ').trim();\nconst attrs = (tag) => {\n  const o = {};\n  const body = String(tag).replace(/^<[a-zA-Z0-9]+/, '').replace(/\\/?>$/, '');\n  const re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\"'>]+)))?/g;\n  let m;\n  while ((m = re.exec(body)) !== null) {\n    o[m[1].toLowerCase()] = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : (m[4] !== undefined ? m[4] : ''));\n  }\n  return o;\n};\n\nconst disallow = [];\nconst robots = await fetchUrl(originOf(start) + '/robots.txt', 'GET');\nif (robots.status === 200) {\n  let applies = false;\n  robots.body.split(String.fromCharCode(10)).forEach((raw) => {\n    const line = raw.split('#')[0].trim();\n    const m = line.match(/^([A-Za-z-]+)\\s*:\\s*(.*)$/);\n    if (!m) return;\n    const key = m[1].toLowerCase();\n    if (key === 'user-agent') { applies = m[2].trim() === '*'; }\n    else if (key === 'disallow' && applies && m[2].trim()) { disallow.push(m[2].trim()); }\n  });\n  notes.push('robots.txt honoured (' + disallow.length + ' disallow rule(s) for all agents).');\n} else {\n  notes.push('No robots.txt found (HTTP ' + robots.status + ').');\n}\nconst allowedByRobots = (u) => {\n  const pu = parseUrl(u);\n  if (!pu) return false;\n  return !disallow.some((d) => pu.pathname.indexOf(d) === 0);\n};\n\nconst statusMap = {};\nconst errMap = {};\nconst linkMap = {};\nconst emails = {};\nconst pages = [];\nconst seen = {};\nconst queue = [];\nconst startNorm = finalize(cfg.startUrl);\nqueue.push(startNorm);\nseen[startNorm] = true;\nlet fetched = 0;\n\nwhile (queue.length > 0 && fetched < maxPages) {\n  const url = queue.shift();\n  if (!allowedByRobots(url)) { notes.push('Skipped by robots.txt: ' + url); continue; }\n  if (fetched > 0) await sleep(delayMs);\n  fetched += 1;\n  const r = await fetchUrl(url, 'GET');\n  statusMap[url] = r.status;\n  if (r.status === 0 || r.status >= 400) {\n    errMap[url] = r.error || ('HTTP ' + r.status);\n    if (!linkMap[url]) add(url, 'links', 'high', 'broken-page', 'Start page could not be loaded', errMap[url], 'Check the URL and that the site is reachable.');\n    continue;\n  }\n  if (r.type && r.type.toLowerCase().indexOf('html') === -1) { notes.push('Skipped non-HTML resource: ' + url); continue; }\n  const html = r.body;\n\n  const titleM = html.match(/<title[^>]*>([^]*?)<\\/title>/i);\n  const title = titleM ? strip(titleM[1]) : '';\n  let desc = null;\n  let viewport = false;\n  (html.match(/<meta\\b[^>]*>/gi) || []).forEach((m) => {\n    const a = attrs(m);\n    const n = String(a.name || '').toLowerCase();\n    if (n === 'description') desc = a.content || '';\n    if (n === 'viewport') viewport = true;\n  });\n  const lang = attrs((html.match(/<html\\b[^>]*>/i) || [''])[0]).lang;\n\n  if (!title) add(url, 'seo', 'high', 'missing-title', 'Page has no <title>', 'No <title> element found', 'Add a unique, descriptive title (under 60 characters).');\n  else if (title.length > 60) add(url, 'seo', 'low', 'long-title', 'Title is longer than 60 characters', title, 'Shorten the title so it is not truncated in search results.');\n  if (desc === null || desc === '') add(url, 'seo', 'medium', 'missing-meta-description', 'Meta description is missing or empty', 'No <meta name=\"description\"> content', 'Add a 50-160 character description.');\n  else if (desc.length < 50 || desc.length > 160) add(url, 'seo', 'low', 'meta-description-length', 'Meta description length is ' + desc.length + ' characters', desc, 'Aim for 50-160 characters.');\n  if (!lang) add(url, 'accessibility', 'medium', 'html-lang-missing', 'The html element has no lang attribute (WCAG 3.1.1)', '<html> without lang', 'Add lang=\"en\" (or the correct language).');\n  if (!viewport) add(url, 'seo', 'low', 'missing-viewport', 'No viewport meta tag (mobile rendering)', 'No <meta name=\"viewport\">', 'Add <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">.');\n\n  const levels = [];\n  const hRe = /<h([1-6])\\b/gi;\n  let hm;\n  while ((hm = hRe.exec(html)) !== null) { levels.push(Number(hm[1])); }\n  const h1Count = levels.filter((l) => l === 1).length;\n  if (h1Count === 0) add(url, 'accessibility', 'medium', 'missing-h1', 'Page has no H1 heading', 'Found headings: ' + (levels.length ? levels.map((l) => 'h' + l).join(',') : 'none'), 'Add one H1 that describes the page.');\n  else if (h1Count > 1) add(url, 'accessibility', 'low', 'multiple-h1', 'Page has ' + h1Count + ' H1 headings', h1Count + ' <h1> elements', 'Use a single H1 per page.');\n  for (let i = 1; i < levels.length; i++) {\n    if (levels[i] - levels[i - 1] > 1) { add(url, 'accessibility', 'low', 'heading-order', 'Heading levels skip (h' + levels[i - 1] + ' to h' + levels[i] + ')', 'Heading sequence: ' + levels.map((l) => 'h' + l).join(','), 'Do not skip heading levels.'); break; }\n  }\n\n  (html.match(/<img\\b[^>]*>/gi) || []).forEach((img) => {\n    const ia = attrs(img);\n    if (ia.alt === undefined) add(url, 'accessibility', 'high', 'img-missing-alt', 'Image has no alt attribute (WCAG 1.1.1)', snip(img), 'Add descriptive alt text, or alt=\"\" if purely decorative.');\n    else if (/\\.(png|jpe?g|gif|svg|webp)$/i.test(ia.alt.trim())) add(url, 'accessibility', 'low', 'img-filename-alt', 'Alt text looks like a file name', snip(img), 'Describe the image content instead of the file name.');\n  });\n\n  (html.match(/<a\\b[^>]*>[^]*?<\\/a>/gi) || []).forEach((a) => {\n    const openTag = a.match(/^<a\\b[^>]*>/i)[0];\n    const at = attrs(openTag);\n    const inner = a.replace(/^<a\\b[^>]*>/i, '').replace(/<\\/a>$/i, '');\n    const text = strip(inner);\n    const imgTag = (inner.match(/<img\\b[^>]*>/i) || [''])[0];\n    const hasName = text.length > 0 || !!at['aria-label'] || !!at.title || (imgTag !== '' && !!attrs(imgTag).alt);\n    if (at.href === undefined) return;\n    if (!hasName) add(url, 'accessibility', 'high', 'link-no-name', 'Link has no accessible name (WCAG 2.4.4)', snip(a), 'Add link text or an aria-label.');\n    else if (/^(click here|here|read more|more|link)$/i.test(text)) add(url, 'accessibility', 'low', 'link-generic-text', 'Link text is not descriptive', snip(a), 'Use link text that makes sense out of context.');\n    if (at.href === '' || at.href === '#') { add(url, 'content', 'low', 'placeholder-link', 'Link points to an empty or \"#\" target', snip(openTag), 'Point the link to a real destination or remove it.'); return; }\n    const target = norm(at.href, url);\n    if (!target) return;\n    (linkMap[target] = linkMap[target] || []).push(url);\n    const tu = parseUrl(target);\n    if (tu && tu.hostname === host && !seen[target] && !/\\.(pdf|jpe?g|png|gif|svg|webp|zip|css|js|ico|mp4)$/i.test(tu.pathname)) { seen[target] = true; queue.push(target); }\n  });\n\n  const labelFor = {};\n  (html.match(/<label\\b[^>]*>/gi) || []).forEach((l) => { const f = attrs(l)['for']; if (f) labelFor[f] = true; });\n  const labelBlocks = html.match(/<label\\b[^>]*>[^]*?<\\/label>/gi) || [];\n  (html.match(/<(input|select|textarea)\\b[^>]*>/gi) || []).forEach((f) => {\n    const fa = attrs(f);\n    const t = String(fa.type || 'text').toLowerCase();\n    if (['hidden', 'submit', 'button', 'image', 'reset'].indexOf(t) !== -1) return;\n    const labelled = !!fa['aria-label'] || !!fa['aria-labelledby'] || !!fa.title || (fa.id && labelFor[fa.id]) || labelBlocks.some((b) => b.indexOf(f) !== -1);\n    if (!labelled) add(url, 'accessibility', 'high', 'form-field-no-label', 'Form field has no associated label (WCAG 1.3.1 / 3.3.2)', snip(f), 'Add a <label for=\"id\"> or an aria-label.');\n  });\n\n  const text = strip(html.replace(/<head[^]*?<\\/head>/i, ' '));\n  const words = text ? text.split(' ').length : 0;\n  const ph = text.match(/lorem ipsum|\\bTODO\\b|\\bTBD\\b|coming soon|under construction/i);\n  if (ph) add(url, 'content', 'medium', 'placeholder-content', 'Placeholder or unfinished text found', 'Matched \"' + ph[0] + '\" near: ' + text.slice(Math.max(0, ph.index - 40), ph.index + 60), 'Replace with final content.');\n  if (words < 50) add(url, 'content', 'low', 'thin-content', 'Page has very little text (' + words + ' words)', text.slice(0, 120), 'Check whether the page is intentionally minimal.');\n  (text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g) || []).forEach((e) => {\n    const k = e.toLowerCase();\n    (emails[k] = emails[k] || []).push(url);\n  });\n  pages.push({ url: url, status: r.status, title: title, words: words, sample: text.slice(0, 700) });\n}\n\npages.forEach((p) => { statusMap[p.url] = p.status; });\nconst targets = Object.keys(linkMap);\nconst toCheck = targets.filter((t) => statusMap[t] === undefined && allowedByRobots(t)).slice(0, maxLinkChecks);\nconst unchecked = targets.filter((t) => statusMap[t] === undefined).length - toCheck.length;\nfor (const t of toCheck) {\n  await sleep(delayMs);\n  let lr = await fetchUrl(t, 'HEAD');\n  if (lr.status === 0 || lr.status === 403 || lr.status === 405 || lr.status === 501) lr = await fetchUrl(t, 'GET');\n  statusMap[t] = lr.status;\n  if (lr.error) errMap[t] = lr.error;\n}\nif (unchecked > 0) notes.push(unchecked + ' link target(s) not checked (limit of ' + maxLinkChecks + ' extra checks per run).');\ntargets.forEach((t) => {\n  const s = statusMap[t];\n  if (s === 0 || s >= 400) {\n    const srcs = linkMap[t].filter((v, i, arr) => arr.indexOf(v) === i);\n    add(srcs[0], 'links', (s === 404 || s === 410) ? 'high' : 'medium', 'broken-link', 'Broken link: ' + (s ? 'HTTP ' + s : 'unreachable'), 'Target: ' + t + ' | found on: ' + srcs.slice(0, 3).join(', '), 'Update or remove the link.');\n  }\n});\n\nconst titleGroups = {};\npages.forEach((p) => { if (p.title) { (titleGroups[p.title] = titleGroups[p.title] || []).push(p.url); } });\nObject.keys(titleGroups).forEach((t) => {\n  if (titleGroups[t].length > 1) add(titleGroups[t][0], 'seo', 'low', 'duplicate-title', 'Same title used on ' + titleGroups[t].length + ' pages', 'Title \"' + t + '\" on: ' + titleGroups[t].slice(0, 4).join(', '), 'Give each page a unique title.');\n});\nconst emailKeys = Object.keys(emails);\nif (emailKeys.length > 1) {\n  add(startNorm, 'content', 'low', 'multiple-contact-emails', 'Several different email addresses found - verify this is intended', emailKeys.slice(0, 5).map((e) => e + ' (' + emails[e][0] + ')').join('; '), 'Confirm the addresses are current and consistent.');\n}\n\nreturn [{ json: {\n  config: { startUrl: cfg.startUrl, allowedDomain: cfg.allowedDomain, maxPages: maxPages, crawlDelayMs: delayMs },\n  stats: { pagesCrawled: pages.length, linksChecked: toCheck.length, findingsTotal: findings.length },\n  pages: pages,\n  findings: findings,\n  notes: notes\n} }];"
+      },
+      "id": "5c9e08ac-d417-42db-a0b9-d851feb0f678",
+      "name": "Bounded Crawl & Rule Checks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        272
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst cfg = $('Audit Config').first().json;\nconst sample = d.pages.slice(0, 8).map((p) => 'URL: ' + p.url + '\\nTitle: ' + p.title + '\\nText: ' + p.sample).join('\\n---\\n');\nconst prompt = 'You are a QA reviewer for website content. Below are text excerpts from pages of one website. List up to 5 POSSIBLE content inconsistencies (conflicting facts, naming, tone, contact details, prices, dates). For each one give: the page URL(s), a short exact quote as evidence, and why it may be a problem. If you find none, reply exactly: No inconsistencies found. Do not invent facts or quotes.\\n\\n' + sample;\nreturn [{ json: {\n  useAI: cfg.useAI === true || String(cfg.useAI) === 'true',\n  llmPrompt: prompt\n} }];"
+      },
+      "id": "0d429b8c-e583-4b9d-9d67-931884fb620a",
+      "name": "Build AI Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.useAI }}",
+              "operator": {
+                "operation": "true",
+                "singleValue": true,
+                "type": "boolean"
+              }
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          }
+        },
+        "options": {}
+      },
+      "id": "eb06a87b-c790-487c-bf1b-ab6d3a42aa33",
+      "name": "Use AI Review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1232,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $('Bounded Crawl & Rule Checks').first().json;\nlet ai = '';\nlet aiStatus = 'AI step skipped (AI review not requested). All findings below come from deterministic rules.';\ntry {\n  const o = $('Ask Claude (Anthropic)').first().json;\n  const t = o.mergedResponse || (Array.isArray(o.content) && o.content[0] && o.content[0].text) || o.text || '';\n  if (t) { ai = String(t).trim(); aiStatus = 'AI notes generated by Claude (Anthropic).'; }\n  else { aiStatus = 'AI step failed or returned nothing; rule-based findings are unaffected.'; }\n} catch (e) {}\nconst esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\nconst sevRank = { high: 0, medium: 1, low: 2 };\nconst sorted = d.findings.slice().sort((a, b) => sevRank[a.severity] - sevRank[b.severity]);\nconst counts = { high: 0, medium: 0, low: 0 };\nconst cats = {};\nd.findings.forEach((f) => { counts[f.severity] += 1; cats[f.category] = (cats[f.category] || 0) + 1; });\nconst byPage = {};\nsorted.forEach((f) => { (byPage[f.url] = byPage[f.url] || []).push(f); });\nconst pageUrls = Object.keys(byPage);\nconst today = new Date().toISOString().slice(0, 10);\nconst disclaimer = 'Automated checks cover a subset of common issues and are NOT a full accessibility audit or WCAG certification. Manual testing with assistive technology and expert review are still required. Nothing on the website was modified.';\n\nconst md = [];\nmd.push('# Website Quality & Content Audit');\nmd.push('');\nmd.push('- Target: ' + d.config.startUrl);\nmd.push('- Date: ' + today);\nmd.push('- Pages crawled: ' + d.stats.pagesCrawled + ' (limit ' + d.config.maxPages + '), extra links checked: ' + d.stats.linksChecked);\nmd.push('- Findings: ' + d.findings.length + ' (high ' + counts.high + ', medium ' + counts.medium + ', low ' + counts.low + ')');\nmd.push('');\nmd.push('> ' + disclaimer);\nmd.push('');\nmd.push('## Findings by page');\nif (pageUrls.length === 0) md.push('No findings from the automated rules.');\npageUrls.forEach((u) => {\n  md.push('');\n  md.push('### ' + u);\n  byPage[u].forEach((f) => {\n    md.push('- **[' + f.severity.toUpperCase() + ']** ' + f.id + ' ' + f.rule + ' (' + f.category + '): ' + f.message);\n    md.push('  - Evidence: \"' + f.evidence + '\"');\n    md.push('  - Suggested fix: ' + f.fix);\n  });\n});\nmd.push('');\nmd.push('## AI-assisted content review (unverified interpretation)');\nmd.push(aiStatus);\nif (ai) { md.push(''); md.push(ai); md.push(''); md.push('_AI output may be wrong. Verify against the pages before acting._'); }\nmd.push('');\nmd.push('## Crawl notes');\nd.notes.forEach((n) => md.push('- ' + n));\n\nconst sevColor = { high: '#b42318', medium: '#b54708', low: '#475467' };\nconst html = [];\nhtml.push('<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Website Audit Report</title>');\nhtml.push('<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#101828;line-height:1.5}h1{margin-bottom:.2rem}.card{border:1px solid #d0d5dd;border-radius:8px;padding:.8rem 1rem;margin:.6rem 0}.sev{font-weight:700;text-transform:uppercase;font-size:.8rem}.ev{background:#f2f4f7;padding:.3rem .5rem;border-radius:4px;font-family:monospace;font-size:.85rem;overflow-wrap:anywhere}.note{background:#fffaeb;border:1px solid #fedf89;padding:.7rem 1rem;border-radius:8px}</style></head><body>');\nhtml.push('<h1>Website Quality &amp; Content Audit</h1>');\nhtml.push('<p>Target: ' + esc(d.config.startUrl) + ' | ' + today + ' | Pages crawled: ' + d.stats.pagesCrawled + '</p>');\nhtml.push('<p><strong>' + d.findings.length + ' findings</strong>: high ' + counts.high + ', medium ' + counts.medium + ', low ' + counts.low + '</p>');\nhtml.push('<p class=\"note\">' + esc(disclaimer) + '</p>');\nhtml.push('<h2>Findings by page</h2>');\nif (pageUrls.length === 0) html.push('<p>No findings from the automated rules.</p>');\npageUrls.forEach((u) => {\n  html.push('<h3>' + esc(u) + '</h3>');\n  byPage[u].forEach((f) => {\n    html.push('<div class=\"card\"><span class=\"sev\" style=\"color:' + sevColor[f.severity] + '\">' + esc(f.severity) + '</span> ' + esc(f.id) + ' ' + esc(f.rule) + ' (' + esc(f.category) + ')<br>' + esc(f.message) + '<div class=\"ev\">' + esc(f.evidence) + '</div><small>Fix: ' + esc(f.fix) + '</small></div>');\n  });\n});\nhtml.push('<h2>AI-assisted content review (unverified interpretation)</h2><p>' + esc(aiStatus) + '</p>');\nif (ai) html.push('<pre style=\"white-space:pre-wrap\">' + esc(ai) + '</pre><p><em>AI output may be wrong. Verify against the pages before acting.</em></p>');\nhtml.push('<h2>Crawl notes</h2><ul>' + d.notes.map((n) => '<li>' + esc(n) + '</li>').join('') + '</ul></body></html>');\n\nconst issueDrafts = [];\n\nreturn [{ json: {\n  summary: { target: d.config.startUrl, pagesCrawled: d.stats.pagesCrawled, totalFindings: d.findings.length, bySeverity: counts, byCategory: cats },\n  aiStatus: aiStatus,\n  reportMarkdown: md.join('\\n'),\n  reportHtml: html.join('\\n'),\n  issueDrafts: issueDrafts\n} }];"
+      },
+      "id": "4c1c2a5a-120d-4ee8-8598-710319c349c9",
+      "name": "Generate Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "stop-msg",
+              "name": "message",
+              "type": "string",
+              "value": "Audit blocked. Send a valid http(s) startUrl (for example https://example.com), and only for sites you own or have written permission to test."
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1d5e361c-d381-4d27-b248-0f562503af73",
+      "name": "Stop - Not Authorised",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        720,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "website-audit",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "f45c9153-b59c-4d79-8cf6-a26179cb52e1",
+      "name": "Audit Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: ($('Upload PDF Report to Drive').first().json.webViewLink || $('Convert Report to PDF').first().json.url) ? 'completed' : 'pdf_failed', target: $('Generate Report').first().json.summary.target, pdfFileName: $('Upload PDF Report to Drive').first().json.name || null, pdfReportLink: $('Upload PDF Report to Drive').first().json.webViewLink || $('Convert Report to PDF').first().json.url || null, note: 'All findings, evidence, GitHub issue drafts, crawl summary and AI notes are inside the PDF. Drafts are NOT published to GitHub. Automated checks are not a WCAG certification.' }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "e181f904-5f45-451b-9ed7-45e63bfcbc8f",
+      "name": "Respond - Audit Complete",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2880,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'blocked', message: $json.message }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "d1f2462a-a295-431b-9aab-568aad808d59",
+      "name": "Respond - Not Authorised",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        960,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "apiKey",
+        "operation": "URL/HTML to PDF",
+        "convertType": "htmlToPDF",
+        "html": "={{ $json.reportHtmlFull }}",
+        "advancedOptions": {
+          "name": "website-audit-report.pdf",
+          "margins": "15mm",
+          "mediaType": "print",
+          "orientation": "portrait",
+          "paperSize": "a4",
+          "printBackground": true
+        }
+      },
+      "id": "55c0d8a8-1ba9-43ad-bfb1-bdc2d4265924",
+      "name": "Convert Report to PDF",
+      "type": "n8n-nodes-pdfco.PDFco Api",
+      "typeVersion": 1.1,
+      "position": [
+        2160,
+        128
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "report_pdf"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "0d455866-c6cd-4f7c-b272-08a61913243a",
+      "name": "Download PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2400,
+        128
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "inputDataFieldName": "report_pdf",
+        "name": "={{ 'website-audit-' + $('Audit Config').first().json.allowedDomain + '-' + new Date().toISOString().slice(0,10) + '.pdf' }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "cachedResultName": "/ (Root folder)",
+          "mode": "list",
+          "value": "root"
+        },
+        "options": {}
+      },
+      "id": "5559a91f-1a10-4dff-9a50-fccbd1f88ecb",
+      "name": "Upload PDF Report to Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2640,
+        128
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crawl = $('Bounded Crawl & Rule Checks').first().json;\nconst findings = crawl.findings || [];\nconst rank = { high: 0, medium: 1, low: 2 };\nconst sevColor = { high: '#b42318', medium: '#b54708', low: '#475467' };\nconst disclaimer = 'Automated checks cover a subset of common issues and are not a full accessibility audit or WCAG certification. Verify each finding manually.';\nconst esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\nconst uniq = (arr) => arr.filter((v, i) => arr.indexOf(v) === i);\nconst worst = (list) => list.map((f) => f.severity).sort((a, b) => rank[a] - rank[b])[0];\nconst labelsFor = (sev, cats) => ['website-audit', 'priority-' + sev].concat(cats.map((c) => 'area-' + c));\nconst make = (scope, title, list) => {\n  const sev = worst(list);\n  return { title: title, scope: scope, severity: sev, labels: labelsFor(sev, uniq(list.map((f) => f.category))), status: 'DRAFT - not published to GitHub', rules: uniq(list.map((f) => f.rule)), pages: uniq(list.map((f) => f.url)), findings: list, fixes: uniq(list.map((f) => f.fix)).slice(0, 5) };\n};\nconst drafts = [];\nconst used = {};\nconst byRule = {};\nfindings.forEach((f) => { (byRule[f.rule] = byRule[f.rule] || []).push(f); });\nObject.keys(byRule).forEach((rule) => {\n  const list = byRule[rule];\n  const pages = uniq(list.map((f) => f.url));\n  if (pages.length >= 3) {\n    drafts.push(make('site-wide', '[Website audit] ' + rule + ' on ' + pages.length + ' pages', list));\n    list.forEach((f) => { used[f.id] = true; });\n  }\n});\nconst byPage = {};\nfindings.filter((f) => !used[f.id] && f.severity !== 'low').forEach((f) => { (byPage[f.url] = byPage[f.url] || []).push(f); });\nObject.keys(byPage).forEach((u) => {\n  const list = byPage[u];\n  let path = u;\n  try { path = new URL(u).pathname || '/'; } catch (e) {}\n  drafts.push(make('page', '[Website audit] ' + list.length + ' issue(s) on ' + path, list));\n  list.forEach((f) => { used[f.id] = true; });\n});\nconst lows = findings.filter((f) => !used[f.id]);\nif (lows.length > 0) {\n  drafts.push(make('cleanup', '[Website audit] Low-priority cleanup (' + lows.length + ' findings)', lows));\n}\ndrafts.sort((a, b) => rank[a.severity] - rank[b.severity]);\nconst renderDraft = (d, i) => {\n  const h = [];\n  h.push('<div class=\"card\" style=\"page-break-inside:avoid\">');\n  h.push('<span class=\"sev\" style=\"color:' + sevColor[d.severity] + '\">' + esc(d.severity) + '</span> Draft ' + (i + 1) + ': ' + esc(d.title));\n  h.push('<br><small>Labels: ' + d.labels.map(esc).join(', ') + ' | Scope: ' + esc(d.scope) + ' | Rules: ' + d.rules.map(esc).join(', ') + '</small>');\n  h.push('<p><strong>Affected pages</strong></p><ul>' + d.pages.slice(0, 15).map((u) => '<li>' + esc(u) + '</li>').join('') + (d.pages.length > 15 ? '<li>...and ' + (d.pages.length - 15) + ' more</li>' : '') + '</ul>');\n  h.push('<p><strong>Findings and evidence</strong></p><ul>' + d.findings.slice(0, 12).map((f) => '<li>[' + esc(f.severity.toUpperCase()) + '] ' + esc(f.id) + ' ' + esc(f.message) + ' <small>(' + esc(f.url) + ')</small><div class=\"ev\">' + esc(f.evidence) + '</div></li>').join('') + (d.findings.length > 12 ? '<li>...and ' + (d.findings.length - 12) + ' more findings</li>' : '') + '</ul>');\n  h.push('<p><strong>Suggested fix</strong></p><ul>' + d.fixes.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>');\n  h.push('<p><strong>Done when</strong></p><ul><li>&#9744; Fix applied by the site owner</li><li>&#9744; Audit re-run and the finding no longer appears</li></ul>');\n  h.push('</div>');\n  return h.join('');\n};\nconst section = '<h2>GitHub issue drafts (not published)</h2><p class=\"note\">These are drafts only. Nothing was created on GitHub and the website was not modified. ' + esc(disclaimer) + '</p>' + (drafts.length > 0 ? drafts.map(renderDraft).join('') : '<p>No issues to draft - the automated rules found nothing.</p>');\nconst base = String($('Generate Report').first().json.reportHtml || '');\nconst idx = base.lastIndexOf('</body>');\nconst full = idx === -1 ? base + section : base.slice(0, idx) + section + base.slice(idx);\nreturn [{ json: { issueDraftCount: drafts.length, issueDrafts: drafts, reportHtmlFull: full } }];"
+      },
+      "id": "299421d7-9c01-411e-9b0d-00fd5630c53b",
+      "name": "Build GitHub Issue Drafts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1808,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-sonnet-5-5"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "={{ $json.llmPrompt }}"
+            }
+          ]
+        },
+        "options": {
+          "includeMergedResponse": true,
+          "system": "You are a careful website content QA reviewer. Only report inconsistencies that are supported by the provided excerpts. Never invent facts, URLs or quotes.",
+          "maxTokens": 1024
+        }
+      },
+      "id": "cf690228-5d92-4b96-9be4-b2bb4b9aebe4",
+      "name": "Ask Claude (Anthropic)",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [
+        1360,
+        80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'error', message: String(($json.error && $json.error.message) || $json.message || 'Audit failed while crawling.') }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "1caf3ad8-c5a8-42b7-8718-fbfcf95b2016",
+      "name": "Respond - Audit Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        960,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crawl = $('Bounded Crawl & Rule Checks').first().json;\nconst gen = $('Generate Report').first().json;\nconst base = $input.first().json;\nconst esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst cats = (gen.summary && gen.summary.byCategory) || {};\nconst sev = (gen.summary && gen.summary.bySeverity) || {};\nconst h = [];\nh.push('<style>table{border-collapse:collapse;width:100%;margin:8px 0}th{background:#eef2ff;text-align:left}th,td{border:1px solid #d0d5dd;padding:4px 8px;font-size:12px;overflow-wrap:anywhere}</style>');\nh.push('<h2>Crawl summary</h2>');\nh.push('<table><tr><th>Severity</th><th>Findings</th></tr>' + ['high', 'medium', 'low'].map((k) => '<tr><td>' + k + '</td><td>' + (sev[k] || 0) + '</td></tr>').join('') + '</table>');\nh.push('<table><tr><th>Category</th><th>Findings</th></tr>' + Object.keys(cats).map((k) => '<tr><td>' + esc(k) + '</td><td>' + cats[k] + '</td></tr>').join('') + '</table>');\nh.push('<p>Pages crawled: ' + crawl.stats.pagesCrawled + ' | Extra links checked: ' + crawl.stats.linksChecked + ' | Max pages: ' + crawl.config.maxPages + ' | Delay: ' + crawl.config.crawlDelayMs + ' ms</p>');\nh.push('<h2>Pages crawled</h2>');\nh.push('<table><tr><th>URL</th><th>HTTP</th><th>Title</th><th>Words</th></tr>' + (crawl.pages || []).map((p) => '<tr><td>' + esc(p.url) + '</td><td>' + p.status + '</td><td>' + esc(p.title) + '</td><td>' + p.words + '</td></tr>').join('') + '</table>');\nconst html = String(base.reportHtmlFull || '');\nconst idx = html.lastIndexOf('</body>');\nconst full = idx === -1 ? html + h.join('') : html.slice(0, idx) + h.join('') + html.slice(idx);\nreturn [{ json: Object.assign({}, base, { reportHtmlFull: full }) }];"
+      },
+      "id": "98e903d5-64fa-4674-8347-b88ba97b37de",
+      "name": "Add Crawl Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1936,
+        272
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Audit Config": {
+      "main": [
+        [
+          {
+            "node": "Authorised Target?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Authorised Target?": {
+      "main": [
+        [
+          {
+            "node": "Bounded Crawl & Rule Checks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop - Not Authorised",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bounded Crawl & Rule Checks": {
+      "main": [
+        [
+          {
+            "node": "Build AI Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond - Audit Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build AI Prompt": {
+      "main": [
+        [
+          {
+            "node": "Use AI Review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Webhook": {
+      "main": [
+        [
+          {
+            "node": "Audit Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stop - Not Authorised": {
+      "main": [
+        [
+          {
+            "node": "Respond - Not Authorised",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert Report to PDF": {
+      "main": [
+        [
+          {
+            "node": "Download PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download PDF": {
+      "main": [
+        [
+          {
+            "node": "Upload PDF Report to Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Report": {
+      "main": [
+        [
+          {
+            "node": "Build GitHub Issue Drafts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload PDF Report to Drive": {
+      "main": [
+        [
+          {
+            "node": "Respond - Audit Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use AI Review?": {
+      "main": [
+        [
+          {
+            "node": "Ask Claude (Anthropic)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Claude (Anthropic)": {
+      "main": [
+        [
+          {
+            "node": "Generate Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build GitHub Issue Drafts": {
+      "main": [
+        [
+          {
+            "node": "Add Crawl Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add Crawl Summary": {
+      "main": [
+        [
+          {
+            "node": "Convert Report to PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
