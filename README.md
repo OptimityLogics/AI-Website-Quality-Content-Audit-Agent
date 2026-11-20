@@ -109,7 +109,3 @@ See [setup/setupguide.md](setup/setupguide.md) for the full installation and con
 - GitHub issue drafts are included in the report only. **The workflow does not create or publish GitHub issues and does not modify the audited website.**
 - PDF generation and Drive upload depend on valid service credentials and the availability of those services.
 - The imported workflow has credential references removed. Configure your own credentials after import; never commit API keys, OAuth tokens, or other secrets to this repository.
-
-## License
-
-Add the license and usage terms applicable to your project before distributing this repository.
